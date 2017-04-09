@@ -1,0 +1,165 @@
+---
+title: "AI Camp 2017 - TransferGO"
+author: "G. Vilkelis"
+date: "April 9, 2017"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if (!require('Metrics')) install.packages('Metrics')
+suppressMessages(library(Metrics))
+
+if (!require('xgboost')) install.packages('xgboost')
+suppressMessages(library(xgboost))
+
+if (!require('Matrix')) install.packages('Matrix')
+suppressMessages(library(Matrix))
+
+if (!require('mice')) install.packages('mice')
+suppressMessages(library(mice))
+
+suppressMessages(library(data.table))
+
+
+d <- read.csv(file='D:/_ai_camp/transfergo/data.csv', header=T, sep=',')
+
+```
+
+## Summary
+
+I've analysed customer data set provided by **transferGo**. The goal of analysis was to identify which factors (variables) influence the scoring of the customer. 
+
+The provided datased had very skewed distribution of (maximum) scores 10 (81% percent of all data). This means that a model always predicting value 10 would have a precision of 81%. This also means that any  model which would have a precision rate below 81% would not be usefull at all.
+
+I've trained a model using xgboost (using 80% random sample for training and 20% for testing). While the model showed that number of transactions and first seconds between booking and registration time were most important variables influencing  the score, the model failed  to generalize on unseen data.
+
+
+
+### Loading and cleaning data
+The dataset was download from [https://docs.google.com/spreadsheets/d/16kAUV7NqHHEEVAvSufmc7SZLCRCTthEis3IPKgrB8nw/edit?usp=sharing](https://docs.google.com/spreadsheets/d/16kAUV7NqHHEEVAvSufmc7SZLCRCTthEis3IPKgrB8nw/edit?usp=sharing) on 8th of April, 2017.
+```{r data}
+# dataset size
+dim(d)
+
+# rename columns for easier coding
+names(d)
+names(d) = c('score', 'country', 'transactions','language', 'is_referred', 
+             'first_booking', 'address_status', 'identity_status', 'referrals')
+names(d)
+# convert categorical values to factors
+d$country = as.factor(d$country)
+d$language = as.factor(d$language)
+d$is_referred= as.factor(d$is_referred)
+d$address_status = as.factor(d$address_status)
+d$identity_status = as.factor(d$identity_status)
+```
+### Examining the Score values distribution
+```{r score}
+
+summary(d)
+hist (d$score)
+
+# Percentage of rows with score 10
+sum (d$score == 10)/nrow(d)
+
+```
+
+
+As we can see above, 81% of data rows have a score value of 10. 
+**It means that a 'dumb' predictor which always predicts 10, would have precission of 81%. **
+
+
+
+### Examinining missing values
+There are only a few missing values with no pattern:
+```{r missing_vals}
+md.pattern(d)
+# only 6 country and 7 first_booking values are missing. We will remove missing values
+d <- d[complete.cases(d),]
+
+```
+
+## Creating a model (xgboost)
+
+```{r xgboost}
+
+# convert all categorical input variables to binary representation
+sparse_matrix <- sparse.model.matrix(~., data = d[,2:9])
+
+# split 20% test / 80% training
+set.seed(2) 
+h=sample(c(0,1),prob=c(0.2,0.8),nrow(sparse_matrix),replace=T)
+train=sparse_matrix[h==1,]
+test=sparse_matrix[h==0,]
+
+train_labels = d$score[h==1]
+test_labels = d$score[h==0]
+
+bst <- xgboost(data = train, label = train_labels, max.depth = 15,
+               eta = 1, nthread = 1, nround = 30,objective = "multi:softmax", num_class = 11)
+
+importance <- xgb.importance(feature_names = sparse_matrix@Dimnames[[2]], model = bst)
+head(importance)
+
+
+```
+
+It seems that two variables are much more important than others - seconds from account creation until **first_booking** and the **transacions** count.
+
+## Testing the model
+
+``` {r testing}
+
+# predict
+rez <- predict(bst, test)
+
+# ROC value
+auc(test_labels, rez)
+
+# calculate prediction 'gap' 
+error = test_labels - rez
+
+# percent of correct predictions (precision)
+sum(error == 0 )/length(error)
+
+# since the precission is not good, see if prediction are even close to the actual score:
+#   treat prediction with error range from -2 to +2 as correct
+sum( abs(error) < 3 )/length(error)
+
+```
+Now compare precision of our xgboost model to a model which always predicts 10:
+
+``` {r always_ten}
+# all tens
+all_tens <- rep(10, length(test_labels))
+
+# ROC value
+auc(test_labels, all_tens)
+
+# calculate 'gap' to all 10s
+error2 = test_labels - all_tens
+
+# percent of correct predictions (precision)
+sum(error2 == 0 )/length(error2)
+
+# treat prediction with error range from -2 to +2 as correct
+sum( abs(error2) < 3 )/length(error2)
+
+```
+
+Visualize the xgboost prediction errors
+
+```{r prediction_plot}
+
+# lets compare predicted 
+plot(jitter(rez,3) ~ jitter(test_labels, 3), pch = 3, xlab='actual', ylab='predicted')
+
+
+```
+
+
+As one can see the model mostly predicts 10s and fails to predict score for unseen data.
+
